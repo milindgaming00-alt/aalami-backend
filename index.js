@@ -41,7 +41,6 @@ async function connectToWhatsApp() {
     
     if (connection === 'close') {
       isReady = false;
-      qrCodeData = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log('Connection closed, code:', code);
       if (code !== DisconnectReason.loggedOut) {
