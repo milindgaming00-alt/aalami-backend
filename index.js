@@ -11,6 +11,7 @@ app.use(express.json());
 let qrCodeData = null;
 let isReady = false;
 let sock = null;
+let lastQRTime = null;
 
 async function connectToWhatsApp() {
   const { version } = await fetchLatestBaileysVersion();
@@ -36,6 +37,7 @@ async function connectToWhatsApp() {
     if (qr) {
       console.log('QR received!');
       qrCodeData = await qrcode.toDataURL(qr);
+      lastQRTime = Date.now();
       isReady = false;
     }
     
@@ -44,7 +46,7 @@ async function connectToWhatsApp() {
       const code = lastDisconnect?.error?.output?.statusCode;
       console.log('Connection closed, code:', code);
       if (code !== DisconnectReason.loggedOut) {
-        setTimeout(connectToWhatsApp, 5000);
+        setTimeout(connectToWhatsApp, 3000);
       }
     }
     
@@ -58,7 +60,7 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp().catch(err => {
   console.error('Connection error:', err);
-  setTimeout(connectToWhatsApp, 5000);
+  setTimeout(connectToWhatsApp, 3000);
 });
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
@@ -66,13 +68,14 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', waReady: isReady }
 app.get('/api/status', (req, res) => res.json({ status: 'ok', waReady: isReady }));
 
 app.get('/api/qr', (req, res) => {
-  if (qrCodeData) {
-    res.json({ qr: qrCodeData });
-  } else if (isReady) {
-    res.json({ status: 'connected' });
-  } else {
-    res.json({ status: 'loading' });
+  res.setHeader('Cache-Control', 'no-cache');
+  if (isReady) {
+    return res.json({ status: 'connected' });
   }
+  if (qrCodeData) {
+    return res.json({ qr: qrCodeData, timestamp: lastQRTime });
+  }
+  return res.json({ status: 'loading', qr: null });
 });
 
 app.post('/api/send', async (req, res) => {
