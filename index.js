@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
-const { makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 const app = express();
@@ -13,12 +13,19 @@ let isReady = false;
 let sock = null;
 
 async function connectToWhatsApp() {
+  const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
   sock = makeWASocket({
+    version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: true,
+    browser: ['Aalami', 'Chrome', '1.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 10000,
+    retryRequestDelayMs: 2000
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -27,31 +34,37 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
     
     if (qr) {
+      console.log('QR received!');
       qrCodeData = await qrcode.toDataURL(qr);
       isReady = false;
-      console.log('QR generated');
     }
     
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('Connection closed, reconnecting:', shouldReconnect);
       isReady = false;
-      if (shouldReconnect) connectToWhatsApp();
-    } else if (connection === 'open') {
-      console.log('WhatsApp connected!');
+      qrCodeData = null;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      console.log('Connection closed, code:', code);
+      if (code !== DisconnectReason.loggedOut) {
+        setTimeout(connectToWhatsApp, 5000);
+      }
+    }
+    
+    if (connection === 'open') {
       isReady = true;
       qrCodeData = null;
+      console.log('WhatsApp connected!');
     }
   });
 }
 
-connectToWhatsApp();
+connectToWhatsApp().catch(err => {
+  console.error('Connection error:', err);
+  setTimeout(connectToWhatsApp, 5000);
+});
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', waReady: isReady });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'ok', waReady: isReady }));
+app.get('/api/status', (req, res) => res.json({ status: 'ok', waReady: isReady }));
 
 app.get('/api/qr', (req, res) => {
   if (qrCodeData) {
