@@ -10,7 +10,7 @@ const {
   useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const Anthropic = require('@anthropic-ai/sdk').default;
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,9 +20,15 @@ const MAX_HISTORY_MESSAGES = 20; // per JID, total (user + assistant)
 app.use(cors());
 app.use(express.json());
 
-// ─── Anthropic Client ─────────────────────────────────────────────────────────
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+// ─── Gemini Client ────────────────────────────────────────────────────────────
+// Free API key: https://aistudio.google.com — no credit card required
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const geminiModel = genAI.getGenerativeModel({
+  model: 'gemini-1.5-flash',
+  systemInstruction:
+    'You are a helpful, friendly WhatsApp assistant. Keep your replies concise and conversational. ' +
+    'Avoid markdown formatting like ** or ## since WhatsApp renders plain text. ' +
+    'Use short paragraphs or line breaks for clarity.',
 });
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -60,35 +66,35 @@ function matchRule(text, rules) {
   return null;
 }
 
-// ─── AI Response ──────────────────────────────────────────────────────────────
+// ─── AI Response (Google Gemini — free tier) ──────────────────────────────────
 async function getAIResponse(jid, userMessage) {
   if (!conversationHistory.has(jid)) {
     conversationHistory.set(jid, []);
   }
 
   const history = conversationHistory.get(jid);
-  history.push({ role: 'user', content: userMessage });
 
-  // Trim to last MAX_HISTORY_MESSAGES to manage context size
+  // Trim to last MAX_HISTORY_MESSAGES before sending
+  const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
+
+  // Gemini history format: role is 'user' or 'model', parts is array of {text}
+  const geminiHistory = trimmed.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.text }],
+  }));
+
+  const chat = geminiModel.startChat({ history: geminiHistory });
+  const result = await chat.sendMessage(userMessage);
+  const reply = result.response.text();
+
+  // Store in simple format
+  history.push({ role: 'user', text: userMessage });
+  history.push({ role: 'assistant', text: reply });
+
+  // Keep history bounded
   if (history.length > MAX_HISTORY_MESSAGES) {
     history.splice(0, history.length - MAX_HISTORY_MESSAGES);
   }
-
-  const response = await anthropic.messages.create({
-    model: 'claude-opus-4-6',
-    max_tokens: 1024,
-    thinking: { type: 'adaptive' },
-    system:
-      'You are a helpful, friendly WhatsApp assistant. Keep your replies concise and conversational. ' +
-      'Avoid markdown formatting like ** or ## since WhatsApp renders plain text. ' +
-      'Use short paragraphs or line breaks for clarity.',
-    messages: history,
-  });
-
-  const textBlock = response.content.find((b) => b.type === 'text');
-  const reply = textBlock ? textBlock.text : "I'm sorry, I couldn't process that.";
-
-  history.push({ role: 'assistant', content: reply });
 
   return reply;
 }
@@ -334,8 +340,9 @@ app.delete('/api/history/:jid', (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn('Warning: ANTHROPIC_API_KEY is not set. AI responses will fail.');
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('Warning: GEMINI_API_KEY is not set. AI responses will fail.');
+    console.warn('Get a free key at: https://aistudio.google.com');
   }
   connectToWhatsApp();
 });
