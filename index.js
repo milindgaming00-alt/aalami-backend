@@ -10,6 +10,7 @@ const {
   useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+require('dotenv').config();
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
