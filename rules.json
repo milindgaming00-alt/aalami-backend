@@ -1,0 +1,32 @@
+[
+  {
+    "id": "rule-hello",
+    "pattern": "^(hello|hi|hey|hola|howdy|good morning|good afternoon|good evening)\\b",
+    "flags": "i",
+    "response": "Hello! How can I help you today?"
+  },
+  {
+    "id": "rule-bye",
+    "pattern": "\\b(bye|goodbye|see you|cya|take care|ttyl)\\b",
+    "flags": "i",
+    "response": "Goodbye! Have a great day! Feel free to message anytime."
+  },
+  {
+    "id": "rule-thanks",
+    "pattern": "\\b(thanks|thank you|thx|ty)\\b",
+    "flags": "i",
+    "response": "You're welcome! Is there anything else I can help you with?"
+  },
+  {
+    "id": "rule-hours",
+    "pattern": "\\b(hours|opening|open|close|closing|schedule|timing)\\b",
+    "flags": "i",
+    "response": "Our business hours are Monday–Friday, 9 AM – 6 PM. We're closed on weekends and public holidays."
+  },
+  {
+    "id": "rule-contact",
+    "pattern": "\\b(contact|email|phone|reach|call|support)\\b",
+    "flags": "i",
+    "response": "You can reach us at support@aalami.com or call +1-800-AALAMI. We'll get back to you as soon as possible!"
+  }
+]
