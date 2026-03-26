@@ -1,5 +1,8 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const QRCode = require('qrcode');
 const {
   default: makeWASocket,
@@ -7,12 +10,20 @@ const {
   useMultiFileAuthState,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const Anthropic = require('@anthropic-ai/sdk').default;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const RULES_FILE = path.join(__dirname, 'rules.json');
+const MAX_HISTORY_MESSAGES = 20; // per JID, total (user + assistant)
 
 app.use(cors());
 app.use(express.json());
+
+// ─── Anthropic Client ─────────────────────────────────────────────────────────
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let cachedQR = null;
@@ -20,6 +31,108 @@ let qrTimestamp = null;
 let connectionStatus = 'disconnected';
 let sockInstance = null;
 const QR_MAX_AGE_MS = 55000;
+
+// Per-JID conversation history for AI context
+const conversationHistory = new Map();
+
+// ─── Rules ────────────────────────────────────────────────────────────────────
+function loadRules() {
+  try {
+    return JSON.parse(fs.readFileSync(RULES_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveRules(rules) {
+  fs.writeFileSync(RULES_FILE, JSON.stringify(rules, null, 2));
+}
+
+function matchRule(text, rules) {
+  for (const rule of rules) {
+    try {
+      const regex = new RegExp(rule.pattern, rule.flags || 'i');
+      if (regex.test(text)) return rule;
+    } catch {
+      // skip invalid regex rules
+    }
+  }
+  return null;
+}
+
+// ─── AI Response ──────────────────────────────────────────────────────────────
+async function getAIResponse(jid, userMessage) {
+  if (!conversationHistory.has(jid)) {
+    conversationHistory.set(jid, []);
+  }
+
+  const history = conversationHistory.get(jid);
+  history.push({ role: 'user', content: userMessage });
+
+  // Trim to last MAX_HISTORY_MESSAGES to manage context size
+  if (history.length > MAX_HISTORY_MESSAGES) {
+    history.splice(0, history.length - MAX_HISTORY_MESSAGES);
+  }
+
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-6',
+    max_tokens: 1024,
+    thinking: { type: 'adaptive' },
+    system:
+      'You are a helpful, friendly WhatsApp assistant. Keep your replies concise and conversational. ' +
+      'Avoid markdown formatting like ** or ## since WhatsApp renders plain text. ' +
+      'Use short paragraphs or line breaks for clarity.',
+    messages: history,
+  });
+
+  const textBlock = response.content.find((b) => b.type === 'text');
+  const reply = textBlock ? textBlock.text : "I'm sorry, I couldn't process that.";
+
+  history.push({ role: 'assistant', content: reply });
+
+  return reply;
+}
+
+// ─── Incoming Message Handler ─────────────────────────────────────────────────
+async function handleIncomingMessage(sock, msg) {
+  // Ignore self-sent messages
+  if (msg.key.fromMe) return;
+
+  const jid = msg.key.remoteJid;
+
+  // Extract text from various message types
+  const text =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption ||
+    '';
+
+  if (!text.trim()) return;
+
+  console.log(`Incoming [${jid}]: ${text}`);
+
+  const rules = loadRules();
+  const matchedRule = matchRule(text, rules);
+
+  if (matchedRule) {
+    console.log(`Rule matched: ${matchedRule.id}`);
+    await sock.sendMessage(jid, { text: matchedRule.response });
+    return;
+  }
+
+  // No rule matched — fall back to AI
+  try {
+    const aiReply = await getAIResponse(jid, text);
+    console.log(`AI reply to [${jid}]: ${aiReply.slice(0, 80)}...`);
+    await sock.sendMessage(jid, { text: aiReply });
+  } catch (err) {
+    console.error('AI response error:', err.message);
+    await sock.sendMessage(jid, {
+      text: "I'm sorry, I'm having trouble responding right now. Please try again later.",
+    });
+  }
+}
 
 // ─── Baileys Connection ───────────────────────────────────────────────────────
 async function connectToWhatsApp() {
@@ -65,6 +178,16 @@ async function connectToWhatsApp() {
       if (shouldReconnect) {
         setTimeout(connectToWhatsApp, 3000);
       }
+    }
+  });
+
+  // Listen for incoming messages
+  sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of msgs) {
+      await handleIncomingMessage(sock, msg).catch((err) =>
+        console.error('Message handler error:', err)
+      );
     }
   });
 }
@@ -130,8 +253,89 @@ app.post('/api/broadcast', async (req, res) => {
   res.json({ results });
 });
 
+// ─── Rule Management Routes ───────────────────────────────────────────────────
+
+// GET /api/rules — list all rules
+app.get('/api/rules', (req, res) => {
+  res.json(loadRules());
+});
+
+// POST /api/rules — create a rule
+// Body: { pattern: string, response: string, flags?: string }
+app.post('/api/rules', (req, res) => {
+  const { pattern, response, flags } = req.body;
+  if (!pattern || !response) {
+    return res.status(400).json({ error: 'pattern and response are required' });
+  }
+
+  // Validate regex before saving
+  try {
+    new RegExp(pattern, flags || 'i');
+  } catch {
+    return res.status(400).json({ error: 'Invalid regex pattern' });
+  }
+
+  const rules = loadRules();
+  const newRule = {
+    id: 'rule-' + crypto.randomUUID().split('-')[0],
+    pattern,
+    flags: flags || 'i',
+    response,
+  };
+  rules.push(newRule);
+  saveRules(rules);
+  res.status(201).json(newRule);
+});
+
+// PUT /api/rules/:id — update a rule
+app.put('/api/rules/:id', (req, res) => {
+  const { pattern, response, flags } = req.body;
+  const rules = loadRules();
+  const idx = rules.findIndex((r) => r.id === req.params.id);
+
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+
+  if (pattern) {
+    try {
+      new RegExp(pattern, flags || rules[idx].flags || 'i');
+    } catch {
+      return res.status(400).json({ error: 'Invalid regex pattern' });
+    }
+    rules[idx].pattern = pattern;
+  }
+  if (flags !== undefined) rules[idx].flags = flags;
+  if (response) rules[idx].response = response;
+
+  saveRules(rules);
+  res.json(rules[idx]);
+});
+
+// DELETE /api/rules/:id — remove a rule
+app.delete('/api/rules/:id', (req, res) => {
+  const rules = loadRules();
+  const filtered = rules.filter((r) => r.id !== req.params.id);
+
+  if (filtered.length === rules.length) {
+    return res.status(404).json({ error: 'Rule not found' });
+  }
+
+  saveRules(filtered);
+  res.json({ success: true });
+});
+
+// DELETE /api/history/:jid — clear AI conversation history for a contact
+app.delete('/api/history/:jid', (req, res) => {
+  conversationHistory.delete(req.params.jid);
+  res.json({ success: true });
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.warn('Warning: ANTHROPIC_API_KEY is not set. AI responses will fail.');
+  }
   connectToWhatsApp();
 });
